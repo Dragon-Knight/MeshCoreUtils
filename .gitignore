@@ -1,0 +1,8 @@
+# Создаются при работе meshcore_reader_json.py (имена по умолчанию, см. CONTACTS_FILE и LOG_FILE)
+mesh_contacts.txt
+mesh_contacts.txt.tmp
+mesh_log.txt
+
+# Python
+__pycache__/
+*.py[cod]
