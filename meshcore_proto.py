@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-VERSION = "2.2"
+VERSION = "2.4"
 
 # ───────────────────────────── Крипто-бэкенды ─────────────────────────────
 
@@ -86,12 +86,14 @@ MAX_PATH_SIZE = 64
 MAX_PAYLOAD = 184
 PUBLIC_KEY = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
 
-# Тип пакета для фильтров и вывода (Packet.kind)
+# Тип пакета для фильтров и вывода (Packet.kind) определяется только типом payload, расшифровка на него
+# не влияет (см. Packet.decrypted). "raw" — пакет не разобран: битый заголовок или payload,
+# зарезервированный тип, нестандартная версия.
 KINDS = ("advert", "message", "data", "direct", "anon", "ack", "trace",
          "control", "multipart", "custom", "raw")
-_KIND_BY_PTYPE = {PT_ACK: "ack", PT_TRACE: "trace", PT_CONTROL: "control",
-                  PT_MULTIPART: "multipart", PT_RAW_CUSTOM: "custom", PT_ANON_REQ: "anon",
-                  **{p: "direct" for p in DIRECT_PTYPES}}
+_KIND_BY_PTYPE = {PT_ADVERT: "advert", PT_GRP_TXT: "message", PT_GRP_DATA: "data", PT_ANON_REQ: "anon",
+                  PT_ACK: "ack", PT_TRACE: "trace", PT_CONTROL: "control", PT_MULTIPART: "multipart",
+                  PT_RAW_CUSTOM: "custom", **{p: "direct" for p in DIRECT_PTYPES}}
 
 
 # ───────────────────────────── Утилиты ─────────────────────────────
@@ -412,8 +414,9 @@ class Packet:
     hash_size: int = 1
     path: bytes = b""
     payload: bytes = b""
-    error: str = ""            # заголовок не разобран, payload не декодировался
+    error: str = ""            # заголовок или payload не разобран (обрезан, слишком короткий)
     invalid: list = field(default_factory=list)   # причины, по которым прошивка отбросит пакет
+    decrypted: Optional[bool] = None   # None — тип без шифрования; True/False — расшифрован или нет
     sections: list = field(default_factory=list)
     info: dict = field(default_factory=dict)      # смысловые поля для вывода и фильтров
     kind: str = "raw"
@@ -464,6 +467,11 @@ class Packet:
         self.sections.append(sec)
         return sec
 
+    def fail(self, sec: Section, reason: str) -> None:
+        """Payload не разобран: пакет станет raw."""
+        self.error = reason
+        sec.warn(reason)
+
 
 # ───────────────────────────── Расшифровка ─────────────────────────────
 
@@ -499,6 +507,7 @@ def _crypto_rows(pkt: Packet, sec: Section, mac: bytes, ct: bytes, keys: list,
                  nokey_reason: str, hint: str) -> Optional[bytes]:
     """MAC ✔/✘, шифртекст, секция Decryption. Возвращает plaintext или None."""
     d = try_decrypt(mac, ct, keys, nokey_reason)
+    pkt.decrypted = d.status == "ok"
     m = mac.hex()
     if d.status in ("ok", "nolib"):
         sec.row("MAC", f"{m}  ✔", "match", "ok")
@@ -563,10 +572,9 @@ def _text_message(pkt: Packet, sec: Section, plain: bytes) -> None:
 def _advert(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     """pubkey(32) timestamp(4) signature(64) appdata: flags [lat lon] [feature1] [feature2] [name]."""
     if len(p) < 100:
-        sec.warn("ADVERT too short (need ≥ 100 B)")
+        pkt.fail(sec, "ADVERT too short (need ≥ 100 B)")
         return
     pub, ts, sig, app = p[:32], struct.unpack_from("<I", p, 32)[0], p[36:100], p[100:]
-    pkt.kind = "advert"
     info = pkt.info
     info.update(pubkey=pub.hex(), timestamp=ts)
     sec.row("Public key", pub.hex())
@@ -623,7 +631,7 @@ def _advert(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
 def _group(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     """channel_hash(1) MAC(2) ciphertext. GRP_TXT: как текстовое сообщение; GRP_DATA: type(2) len(1) data."""
     if len(p) < 3:
-        sec.warn("payload too short (need ≥ 3 B)")
+        pkt.fail(sec, "payload too short (need ≥ 3 B)")
         return
     ch_hash, mac, ct = p[0], p[1:3], p[3:]
     pkt.info["channel_hash"] = ch_hash
@@ -637,24 +645,24 @@ def _group(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     sec = pkt.section("Content")
 
     if pkt.ptype == PT_GRP_DATA:
-        if len(plain) < 3:
-            sec.warn("plaintext shorter than 3 B")
+        # Стандарт: type(2) len(1) data, хвост до 16 B — нули. Иначе формат чужого приложения: не разбираем.
+        data_len = plain[2] if len(plain) >= 3 else -1
+        if data_len < 0 or 3 + data_len > len(plain) or plain[3 + data_len:].strip(b"\0"):
+            pkt.info["data"] = plain
+            sec.row("Format", "non-standard", "not type(2) + len(1) + data; shown as is")
+            _data_rows(sec, plain)
             return
-        data_type, data_len = struct.unpack_from("<HB", plain, 0)
+        data_type = struct.unpack_from("<H", plain, 0)[0]
         data = plain[3:3 + data_len]
-        pkt.kind = "data"
         pkt.info.update(data_type=data_type, data=data)
         sec.row("Data type", f"0x{data_type:04X}", grp_data_app(data_type))
         sec.row("Data len", f"{data_len} B")
-        if len(data) < data_len:
-            sec.warn(f"data shorter than declared: {len(data)} B")
         _data_rows(sec, data)
         return
 
     _text_message(pkt, sec, plain)
     if "text" not in pkt.info:
         return
-    pkt.kind = "message"
     sender, text = split_sender(pkt.info["text"])
     pkt.info["text"] = text
     if sender:
@@ -715,7 +723,7 @@ def _direct(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     if len(p) >= 2:
         pkt.info.update(dst=p[0], src=p[1])
     if len(p) < 4:
-        sec.warn("payload too short (need ≥ 4 B)")
+        pkt.fail(sec, "payload too short (need ≥ 4 B)")
         return
     dst, src, mac, ct = p[0], p[1], p[2:4], p[4:]
     sec.row("Dest hash", f"0x{dst:02X}", "recipient")
@@ -726,7 +734,6 @@ def _direct(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     plain = _crypto_rows(pkt, sec, mac, ct, ring.direct_keys(dst, src), "no keys", hint)
     if plain is None:
         return
-    pkt.info["decrypted"] = True
     sec = pkt.section("Content")
     if pkt.ptype == PT_TXT_MSG:
         _text_message(pkt, sec, plain)
@@ -790,7 +797,7 @@ def _anon(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     if len(p) >= 33:
         pkt.info["sender_pub"] = p[1:33].hex()
     if len(p) < 35:
-        sec.warn("payload too short (need ≥ 35 B)")
+        pkt.fail(sec, "payload too short (need ≥ 35 B)")
         return
     dst, pub, mac, ct = p[0], p[1:33], p[33:35], p[35:]
     ring.add_contact(pub)
@@ -800,13 +807,12 @@ def _anon(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     hint = "  Needs the recipient's private key (prv:...) or the 32-byte shared secret."
     plain = _crypto_rows(pkt, sec, mac, ct, ring.anon_keys(dst, pub), "no keys", hint)
     if plain is not None:
-        pkt.info["decrypted"] = True
         _anon_content(pkt, pkt.section("Content"), plain)
 
 
 def _ack(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     if len(p) < 4:
-        sec.warn("ACK shorter than 4 B")
+        pkt.fail(sec, "ACK shorter than 4 B")
         return
     pkt.info["checksum"] = p[:4].hex()
     sec.row("ACK checksum", p[:4].hex())
@@ -817,7 +823,7 @@ def _ack(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
 def _trace(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     """tag(4) auth(4) flags(1) хэши узлов маршрута; SNR по хопам — в path пакета."""
     if len(p) < 9:
-        sec.warn("payload too short (need ≥ 9 B)")
+        pkt.fail(sec, "payload too short (need ≥ 9 B)")
         return
     tag, auth, flags = struct.unpack_from("<IIB", p, 0)
     size = 1 << (flags & 3)
@@ -831,7 +837,7 @@ def _trace(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
 
 def _multipart(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     if not p:
-        sec.warn("empty payload")
+        pkt.fail(sec, "empty payload")
         return
     inner = p[0] & 0x0F
     pkt.info.update(remaining=p[0] >> 4, inner_type=inner)
@@ -843,7 +849,7 @@ def _multipart(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
 def _control(pkt: Packet, p: bytes, ring: KeyRing, sec: Section) -> None:
     """flags(1): старшие 4 бита — подтип; дальше данные подтипа (не шифруются)."""
     if not p:
-        sec.warn("empty payload")
+        pkt.fail(sec, "empty payload")
         return
     sub = p[0] >> 4
     name = CONTROL_SUBTYPES.get(sub, f"0x{sub:X}")
@@ -963,12 +969,20 @@ def decode_packet(raw: bytes, ring: KeyRing) -> Packet:
         return pkt
     p = pkt.payload
     sec = pkt.section(f"Payload: {PAYLOAD_TYPES.get(pkt.ptype, f'reserved 0x{pkt.ptype:02X}')} ({len(p)} B)")
-    pkt.kind = _KIND_BY_PTYPE.get(pkt.ptype, "raw")
     decoder = _DECODERS.get(pkt.ptype)
     if decoder is None:
+        pkt.invalid.append(f"reserved payload type 0x{pkt.ptype:02X}")
         _custom(pkt, p, ring, sec)
     else:
         decoder(pkt, p, ring, sec)
-    if not pkt.valid:
-        pkt.kind = "raw"
+    pkt.kind = _KIND_BY_PTYPE[pkt.ptype] if pkt.valid else "raw"
     return pkt
+
+
+def describe_kind(pkt: Packet) -> str:
+    """Тип для фильтров с состоянием расшифровки: 'message, decrypted', 'raw: <причина>'."""
+    if pkt.kind == "raw":
+        return "raw: " + ", ".join(([pkt.error] if pkt.error else []) + pkt.invalid)
+    if pkt.decrypted is None:
+        return pkt.kind
+    return f"{pkt.kind}, " + ("decrypted" if pkt.decrypted else "no key")

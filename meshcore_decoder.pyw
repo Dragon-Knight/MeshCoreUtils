@@ -19,7 +19,7 @@ import binascii
 import re
 import sys
 
-from meshcore_proto import HAVE_AES, INSTALL_HINT, VERSION, KeyRing, decode_packet
+from meshcore_proto import HAVE_AES, INSTALL_HINT, VERSION, KeyRing, decode_packet, describe_kind
 
 LABEL_WIDTH = 22
 
@@ -48,7 +48,9 @@ def read_input(text: str) -> bytes:
 
 def render(raw: bytes, ring: KeyRing) -> str:
     lines = []
-    for sec in decode_packet(raw, ring).sections:
+    pkt = decode_packet(raw, ring)
+    pkt.sections[0].row("Filter type", describe_kind(pkt), "type for meshcore_reader_json rules")
+    for sec in pkt.sections:
         lines.append(f"\n── {sec.title} " + "─" * max(3, 64 - len(sec.title)))
         for r in sec.rows:
             if r.status == "warn":

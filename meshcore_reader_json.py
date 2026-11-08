@@ -48,7 +48,7 @@ SEPARATOR_WIDTH = 60           # длина линии между пакетам
 KEYS = [
     "#test", "#ru", "#msk", "#moscow", "#russia", "#chat", "#general",
     "#mesh", "#meshcore", "#ping", "#wardrive", "#bot", "#hello", "#help",
-    "#mytishchi", "#connections", "#robot",
+    "#mytishchi", "#connections", "#robot", "00000000000000000000000000000000",
 ]
 
 # Свой приватный ключ для расшифровки личных сообщений и ANON_REQ, где один из узлов — вы:
@@ -68,21 +68,24 @@ CONTACTS_FILE = "mesh_contacts.txt"
 # Внутри правила все указанные условия объединяются по И. Любое поле можно не указывать,
 # пустое правило {} совпадает с любым пакетом. Неверное правило пропускается с предупреждением.
 #
-#   "type"     — тип пакета или список типов:
-#                advert    — объявления узлов
-#                message   — сообщения в каналах (расшифрованные GRP_TXT)
-#                data      — данные в каналах (расшифрованные GRP_DATA)
-#                direct    — личные: TXT_MSG, REQ, RESPONSE, PATH (без ключа видны только хэши узлов)
-#                anon      — анонимные запросы ANON_REQ (вход на репитер/в комнату и др.)
-#                ack       — подтверждения
-#                trace     — трассировка маршрута с SNR по хопам
-#                control   — служебные (DISCOVER_REQ / DISCOVER_RESP)
-#                multipart — часть составного пакета
+#   "type"     — тип пакета или список типов. Тип = тип payload, есть ключ или нет (см. "decrypted");
+#                плашка в выводе называется так же:
+#                advert    — ADVERT, объявления узлов
+#                message   — GRP_TXT, сообщения в каналах
+#                data      — GRP_DATA, данные в каналах (в т.ч. нестандартного формата)
+#                direct    — TXT_MSG, REQ, RESPONSE, PATH, личные (без ключа видны только хэши узлов)
+#                anon      — ANON_REQ, анонимные запросы (вход на репитер/в комнату и др.)
+#                ack       — ACK, подтверждения
+#                trace     — TRACE, трассировка маршрута с SNR по хопам
+#                control   — CONTROL, служебные (DISCOVER_REQ / DISCOVER_RESP)
+#                multipart — MULTIPART, часть составного пакета
 #                custom    — RAW_CUSTOM
-#                raw       — всё, что не разобрано: каналы с неизвестным ключом, битые и
-#                            нестандартные заголовки, зарезервированные типы
+#                raw       — пакет не разобран: обрезанный/битый заголовок или payload, зарезервированный
+#                            тип, нестандартная версия; причина — в строке Reason
+#   "decrypted"— только для шифрованных типов (message, data, direct, anon):
+#                True — расшифрован, False — нет ключа; у остальных типов не совпадает ни с тем, ни с другим
 #   "channel"  — каналы: имена ["public", "#moscow", "name"] и/или хэши СТРОКАМИ в hex ["6c", "37"];
-#                для message, data и raw (хэш виден и без ключа); у остальных типов не совпадает
+#                для message и data. Хэш виден и без ключа, имя — только после расшифровки
 #   "route"    — "flood" (с TRANSPORT_FLOOD) | "direct" (с TRANSPORT_DIRECT) | "transport_flood" |
 #                "transport_direct" или список
 #   "hops"     — диапазон хопов (Path len), границы включительно:
@@ -90,7 +93,7 @@ CONTACTS_FILE = "mesh_contacts.txt"
 #   "snr"      — диапазон SNR в dB, как hops, можно дробные: (5, None) — от +5 dB и лучше
 #   "rssi"     — диапазон RSSI в dB, как hops: (None, -110) — слабее -110 dB
 #   "match"    — регулярное выражение (без учёта регистра) по имени узла (advert), отправителю и
-#                тексту (message, расшифрованные direct/anon, custom): "dragon", "^Bob$", "привет|hello"
+#                тексту (расшифрованные message/direct/anon, custom): "dragon", "^Bob$", "привет|hello"
 #
 # ── Фильтр экрана ────────────────────────────────────────────────────────
 # SHOW_RULES — что ПОКАЗЫВАТЬ в консоли; пустой список — показывать всё.
@@ -104,6 +107,7 @@ SHOW_RULES = [
 ]
 HIDE_RULES = [
     #{"type": "raw"},
+    #{"decrypted": False},
     {"type": ["anon", "ack", "trace", "control", "multipart"]},
 ]
 
@@ -119,8 +123,8 @@ LOG_RULES = [
     #{"type": "advert", "hops": (0, 2)},
     #{"type": "message", "channel": ["public", "#moscow"], "hops": (0, 3)},
     #{"type": "message", "match": "dragon"},
-    #{"type": "raw", "channel": ["6c", "37"]},
-    #{"type": "raw", "channel": ["37"], "hops": (None, 3)},
+    #{"type": ["message", "data"], "channel": ["6c", "37"], "decrypted": False},
+    {"type": ["message", "data", "raw"], "channel": ["37"], "hops": (None, 10)},
 ]
 
 
@@ -209,7 +213,7 @@ BADGES = {
     "control": ("CONTROL", "🔎", Color.BG_CYAN),
     "multipart": ("MULTIPART", "🧩", Color.BG_CYAN),
     "custom": ("CUSTOM", "❔", Color.BG_CYAN),
-    "raw": ("RAW", "🔒", Color.BG_GRAY),
+    "raw": ("RAW", "⚠️ ", Color.BG_GRAY),
 }
 
 
@@ -250,6 +254,8 @@ def route_line(pkt: Packet, show_type: bool = False, extra: Optional[str] = None
     elif pkt.hops:
         hops += ": " + " → ".join(pkt.hop_list)
     parts.append(paint(hops, Color.GRAY))
+    if pkt.decrypted is False:
+        parts.append(paint("🔒 no key", Color.GRAY))
     text = sep.join(parts)
     if extra:
         text += sep + extra
@@ -278,6 +284,44 @@ def data_line(label: str, data: bytes) -> None:
     line(label, clean(text) if text is not None else f"{data.hex()}  |{ascii_dump(data)}|")
 
 
+# Заготовка под свои декодеры пакетов, которые не удалось расшифровать или разобрать
+# (шифрованные без ключа и raw). Декодер получает (raw: bytes, packet: dict из JSON)
+# и возвращает строку с результатом или None.
+RawDecoder = Callable[[bytes, dict], Optional[str]]
+RAW_DECODERS: list = []
+
+
+def register_raw_decoder(func: RawDecoder) -> RawDecoder:
+    """Используй как декоратор: @register_raw_decoder"""
+    RAW_DECODERS.append(func)
+    return func
+
+
+# Пример:
+# @register_raw_decoder
+# def my_channel_decoder(raw: bytes, packet: dict) -> Optional[str]:
+#     ...расшифровка своим ключом...
+#     return "текст сообщения"
+
+
+def custom_decoder_lines(pkt: Packet, ctx: dict) -> None:
+    for decoder in RAW_DECODERS:
+        try:
+            result = decoder(pkt.raw, ctx["json"])
+        except Exception as e:
+            line("Decoder", f"{decoder.__name__}: {e}", Color.RED)
+            continue
+        if result:
+            line("Decoded", clean(result), Color.GREEN)
+            break
+
+
+def no_key_lines(pkt: Packet, ctx: dict) -> None:
+    """Шифрованный пакет без подходящего ключа."""
+    packet_lines(pkt)
+    custom_decoder_lines(pkt, ctx)
+
+
 # ───────────────────────────── Обработчики типов ─────────────────────────────
 
 def handle_advert(pkt: Packet, ctx: dict) -> None:
@@ -302,22 +346,30 @@ def handle_advert(pkt: Packet, ctx: dict) -> None:
 
 
 def channel_line(pkt: Packet) -> None:
-    line("Channel", "[{:02x}] {}".format(pkt.info["channel_hash"], clean(pkt.info["channel"])), Color.CYAN)
+    name = pkt.info.get("channel")
+    line("Channel", "[{:02x}] {}".format(pkt.info["channel_hash"], clean(name) if name else "unknown key"),
+         Color.CYAN if name else Color.GRAY)
 
 
 def handle_message(pkt: Packet, ctx: dict) -> None:
     route_line(pkt)
     channel_line(pkt)
+    if not pkt.decrypted:
+        no_key_lines(pkt, ctx)
+        return
     if pkt.info.get("sender"):
         line("From", clean(pkt.info["sender"]))
-    line("Text", clean(pkt.info["text"]), Color.BOLD)
+    line("Text", clean(pkt.info.get("text", "—")), Color.BOLD)
 
 
 def handle_data(pkt: Packet, ctx: dict) -> None:
     route_line(pkt)
     channel_line(pkt)
-    dt = pkt.info["data_type"]
-    line("App", f"0x{dt:04x} ({grp_data_app(dt)})")
+    if not pkt.decrypted:
+        no_key_lines(pkt, ctx)
+        return
+    dt = pkt.info.get("data_type")
+    line("App", f"0x{dt:04x} ({grp_data_app(dt)})" if dt is not None else "non-standard format", Color.GRAY if dt is None else Color.YELLOW)
     data_line("Data", pkt.info["data"])
 
 
@@ -346,9 +398,11 @@ def handle_direct(pkt: Packet, ctx: dict) -> None:
     info = pkt.info
     if "dst" in info:
         line("Src Dst", "{} → {}".format(node_label(ring, info["src"]), node_label(ring, info["dst"])), Color.CYAN)
-    if info.get("decrypted"):
+    if pkt.decrypted:
         decrypted_lines(pkt)
-    packet_lines(pkt)
+        packet_lines(pkt)
+    else:
+        no_key_lines(pkt, ctx)
 
 
 def handle_anon(pkt: Packet, ctx: dict) -> None:
@@ -357,11 +411,11 @@ def handle_anon(pkt: Packet, ctx: dict) -> None:
     info = pkt.info
     line("Dest", node_label(ctx["ring"], info["dst"]) if "dst" in info else "—", Color.CYAN)
     line("Sender", info.get("sender_pub", "—"), Color.CYAN)
-    if info.get("decrypted"):
+    if pkt.decrypted:
         decrypted_lines(pkt)
+        packet_lines(pkt)
     else:
-        line("Content", "encrypted (no key)", Color.GRAY)
-    packet_lines(pkt)
+        no_key_lines(pkt, ctx)
 
 
 def handle_ack(pkt: Packet, ctx: dict) -> None:
@@ -405,47 +459,14 @@ def handle_custom(pkt: Packet, ctx: dict) -> None:
     packet_lines(pkt)
 
 
-# Заготовка под свои декодеры нераспознанных пакетов (блок RAW).
-# Декодер получает (raw: bytes, packet: dict из JSON) и возвращает строку с результатом или None.
-RawDecoder = Callable[[bytes, dict], Optional[str]]
-RAW_DECODERS: list = []
-
-
-def register_raw_decoder(func: RawDecoder) -> RawDecoder:
-    """Используй как декоратор: @register_raw_decoder"""
-    RAW_DECODERS.append(func)
-    return func
-
-
-# Пример:
-# @register_raw_decoder
-# def my_channel_decoder(raw: bytes, packet: dict) -> Optional[str]:
-#     ...расшифровка своим ключом...
-#     return "текст сообщения"
-
-
 def handle_raw(pkt: Packet, ctx: dict) -> None:
-    """Пакет без расшифровки (неизвестный канал / нет ключа) или с нестандартным заголовком."""
+    """Пакет не разобран: битый заголовок или payload, зарезервированный тип, нестандартная версия."""
     route_line(pkt, show_type=True)
-    if "channel_hash" in pkt.info:
-        name = clean(pkt.info.get("channel", "unknown key"))
-        line("Channel", "[{:02x}] {}".format(pkt.info["channel_hash"], name), Color.GRAY)
     reasons = ([pkt.error] if pkt.error else []) + pkt.invalid
-    if reasons:
-        line("Reason", ", ".join(reasons), Color.RED)
-    line("Length", f"{len(pkt.raw)} bytes", Color.GRAY)
+    line("Reason", ", ".join(reasons) or "—", Color.RED)
     line("Header", f"0x{pkt.raw[0]:02x}" if pkt.raw else "—", Color.GRAY)
-    line("Packet", pkt.raw.hex(), Color.GRAY)
-
-    for decoder in RAW_DECODERS:
-        try:
-            result = decoder(pkt.raw, ctx["json"])
-        except Exception as e:
-            line("Decoder", f"{decoder.__name__}: {e}", Color.RED)
-            continue
-        if result:
-            line("Decoded", clean(result), Color.GREEN)
-            break
+    packet_lines(pkt)
+    custom_decoder_lines(pkt, ctx)
 
 
 HANDLERS = {
@@ -457,7 +478,7 @@ HANDLERS = {
 
 # ───────────────────────────── Правила ─────────────────────────────
 
-RULE_KEYS = {"type", "channel", "route", "hops", "snr", "rssi", "match"}
+RULE_KEYS = {"type", "decrypted", "channel", "route", "hops", "snr", "rssi", "match"}
 ROUTES = {"flood": {0, 1}, "direct": {2, 3}, "transport_flood": {0}, "transport_direct": {3}}
 HEX_HASH = re.compile(r"[0-9a-fA-F]{2}")
 
@@ -496,6 +517,10 @@ class Rule:
             if bad:
                 raise ValueError(f"unknown type {', '.join(sorted(bad))}; valid: {', '.join(KINDS)}")
 
+        self.decrypted = spec.get("decrypted")
+        if self.decrypted not in (None, True, False):
+            raise ValueError("decrypted: expected True or False")
+
         self.channels = self.hashes = None
         if "channel" in spec:
             items = [str(c).lower() for c in _as_list(spec["channel"])]
@@ -519,6 +544,8 @@ class Rule:
     def matches(self, pkt: Packet, ctx: dict) -> bool:
         if self.types is not None and pkt.kind not in self.types:
             return False
+        if self.decrypted is not None and pkt.decrypted is not self.decrypted:
+            return False
         if self.channels is not None:
             name, h = pkt.info.get("channel"), pkt.info.get("channel_hash")
             if name not in self.channels and h not in self.hashes:
@@ -537,7 +564,7 @@ class Rule:
 
     def describe(self) -> str:
         parts = []
-        for key in ("type", "channel", "route"):
+        for key in ("type", "decrypted", "channel", "route"):
             if key in self.spec:
                 parts.append(f"{key}=" + ",".join(str(v) for v in _as_list(self.spec[key])))
         for key in ("hops", "snr", "rssi"):
